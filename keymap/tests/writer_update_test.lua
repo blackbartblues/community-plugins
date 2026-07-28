@@ -297,6 +297,10 @@ local function runReorderCase(case)
 		assert(result.ok == false and result.error == expectedError,
 			case.rootName .. ": expected " .. expectedError .. ", got " .. tostring(result.error))
 		assert(files[targetSource] == case.content, case.rootName .. ": reorder rollback did not restore source")
+		if anchorSource ~= targetSource then
+			assert(files[anchorSource] == case.anchorContent,
+				case.rootName .. ": reorder rollback did not restore anchor source")
+		end
 		if case.failReload then
 			assert(reloadAttempts == 2, case.rootName .. ": restored config was not reloaded after rollback")
 		end
@@ -304,6 +308,10 @@ local function runReorderCase(case)
 		assert(result.ok == true, case.rootName .. ": " .. tostring(result.error))
 		assert(files[targetSource] == case.expected,
 			case.rootName .. ": unexpected reordered content\n" .. tostring(files[targetSource]))
+		if case.expectedAnchor ~= nil then
+			assert(files[anchorSource] == case.expectedAnchor,
+				case.rootName .. ": unexpected anchor content\n" .. tostring(files[anchorSource]))
+		end
 		if case.expectedWrites ~= nil then
 			assert(writeCount == case.expectedWrites,
 				case.rootName .. ": expected " .. case.expectedWrites .. " writes, got " .. writeCount)
@@ -817,7 +825,18 @@ runReorderCase({
 	anchorSource = "/tmp/keybind-test/reorder-anchor.lua", anchorContent = "-- anchor\n" .. reorderB .. "\n",
 	targetSnippet = reorderA, targetStart = 2, targetEnd = 2,
 	anchorSnippet = reorderB, anchorStart = 2, anchorEnd = 2, placement = "before",
-	error = "different_source",
+	expected = "-- target\n",
+	expectedAnchor = "-- anchor\n-- Keymap bind-category: Test\n" .. reorderA .. "\n" .. reorderB .. "\n",
+	expectedWrites = 2,
+})
+
+runReorderCase({
+	rootName = "reorder-different-source-rollback.lua", content = "-- target\n" .. reorderA .. "\n",
+	targetSource = "/tmp/keybind-test/reorder-target-rollback.lua",
+	anchorSource = "/tmp/keybind-test/reorder-anchor-rollback.lua", anchorContent = "-- anchor\n" .. reorderB .. "\n",
+	targetSnippet = reorderA, targetStart = 2, targetEnd = 2,
+	anchorSnippet = reorderB, anchorStart = 2, anchorEnd = 2, placement = "before",
+	failVerify = true,
 })
 
 runReorderCase({

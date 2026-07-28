@@ -102,6 +102,43 @@ local function normalizePath(path)
 	return normalized ~= "" and normalized or "."
 end
 
+-- Noctalia can be started from a systemd unit, TTY, or SSH session which has a
+-- Wayland display but no HYPRLAND_INSTANCE_SIGNATURE. In that case plain
+-- `hyprctl` cannot find the running compositor. Resolve the instance from
+-- Hyprland's runtime directory and keep the command argument deliberately
+-- restricted to the characters Hyprland uses in instance names.
+local function hyprlandInstance()
+	local runtime = environment("XDG_RUNTIME_DIR")
+	if runtime == "" then return nil end
+	local root = normalizePath(runtime .. "/hypr")
+	local entries = noctalia.listDir(root)
+	if type(entries) ~= "table" then return nil end
+
+	local waylandDisplay = environment("WAYLAND_DISPLAY")
+	local fallback = nil
+	for _, name in ipairs(entries) do
+		if type(name) == "string" and name:match("^[%w_.%-]+$") then
+			local lock = noctalia.readFile(normalizePath(root .. "/" .. name .. "/hyprland.lock"))
+			if type(lock) == "string" and #lock <= 4096 then
+				fallback = fallback or name
+				local socket = lock:match("^[^\r\n]*[\r\n]+([^\r\n]+)")
+				if waylandDisplay ~= "" and socket == waylandDisplay then
+					return name
+				end
+			end
+		end
+	end
+	return fallback
+end
+
+local function hyprctlBindsCommand(json)
+	-- Keep the normal environment-based path when Hyprland exported its
+	-- signature. `-i` is only needed for detached launch environments.
+	local instance = environment("HYPRLAND_INSTANCE_SIGNATURE") == "" and hyprlandInstance() or nil
+	local command = instance ~= nil and ("hyprctl -i " .. instance .. " binds") or "hyprctl binds"
+	return json and (command .. " -j") or command
+end
+
 local function expandedConfigPath()
 	local configured = config("hyprland_config", "~/.config/hypr/hyprland.lua")
 	local expanded = noctalia.expandPath(configured)
@@ -1034,7 +1071,7 @@ function refresh()
 		finishRefresh()
 	end
 	local function requestTextFallback()
-		local fallbackStarted = noctalia.runAsync("hyprctl binds", function(fallbackResult)
+		local fallbackStarted = noctalia.runAsync(hyprctlBindsCommand(false), function(fallbackResult)
 			if requestGeneration ~= refreshGeneration or configuredCompositor() ~= "hyprland" then
 				finishRefresh()
 				return
@@ -1057,7 +1094,7 @@ function refresh()
 			finishRefresh()
 		end
 	end
-	local started = noctalia.runAsync("hyprctl binds -j", function(result)
+	local started = noctalia.runAsync(hyprctlBindsCommand(true), function(result)
 		-- A config change can activate another compositor while hyprctl is still
 		-- running. Never let that stale result replace the newer adapter snapshot.
 		if requestGeneration ~= refreshGeneration or configuredCompositor() ~= "hyprland" then

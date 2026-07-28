@@ -41,6 +41,7 @@ split configuration files, and preserves user-defined categories.
 | Niri service | `niri-service` |
 | MangoWC service | `mangowc-service` |
 | Configuration writer | `writer-service` |
+| Runtime command catalog | `catalog-service` |
 
 The complete plugin ID is `blackbartblues/keymap`.
 
@@ -121,10 +122,13 @@ category, then enter a description and command. The keyboard view can fill the
 combination by clicking a physical key.
 
 Select **Commands** beside the command field to open the known-command
-library. It contains every command exposed by Noctalia's IPC help plus the
-native Hyprland Lua, Niri KDL, or MangoWC actions for the active compositor.
-Filter by source, category, whether an action still needs arguments, or free
-text. Selecting an entry fills the command field; replace every
+library. It reads commands from the running Noctalia instance, including
+commands declared by enabled plugins and their current panel registry. Native
+Hyprland Lua, Niri KDL, or MangoWC actions for the active compositor come from
+the bundled source-backed catalog.
+Filter by origin (Compositor, Community, Official, Development, or Core),
+plugin/compositor name, category, whether an action still needs arguments, or
+free text. Selecting an entry fills the complete command field; replace every
 `{{placeholder}}` with a compositor-valid value before saving. **Custom
 command** returns to an unrestricted shell command, so the library never
 removes the option to type a command manually.
@@ -142,18 +146,23 @@ Hyprland and MangoWC expose press and release activation.
 
 ### Command library
 
-Select **Command library** beside the command field to browse 362 known
-commands and native actions:
+Select **Command library** beside the command field to browse the current
+Noctalia commands and panel registry alongside 264 native compositor actions:
 
 | Source | Entries | Verified from |
 | --- | ---: | --- |
-| Noctalia | 98 | Runtime `noctalia msg --help` output |
+| Noctalia | Runtime-dependent | Current IPC help, plugin command manifests, and registered panels |
 | Hyprland | 51 | Native `hl.dsp.*` dispatcher bindings from Hyprland 0.56.0 |
 | Niri | 135 | Configurable KDL actions from Niri 26.04 |
 | MangoWC | 78 | Current parser dispatchers and official keybinding documentation |
 
-Search by action, syntax, source, or category. Source, category, and readiness
-filters can narrow the results. **Ready** entries can be inserted directly;
+The Noctalia portion is refreshed whenever the library opens, so plugin panels
+and manifest-declared commands are discovered rather than hard-coded. Search
+by action, syntax, origin, plugin/compositor name, or category. Origin,
+plugin/compositor, category, and readiness filters can narrow the results.
+The command input also offers fuzzy completions and corrects common partial
+syntax such as `ms` or `noctalia ms` to `noctalia msg`. **Ready** entries can
+be inserted directly;
 **Needs input** entries contain visible `{{argument}}` placeholders that must
 be replaced before saving. Selecting **Custom command** returns to a normal
 shell command without restricting it to the catalog.
@@ -185,8 +194,9 @@ deletes it after confirmation. Hidden shortcuts remain available in the
 editor's recovery section, where they can be restored or deleted.
 
 Drag a row handle to another position in the same category or into another
-category. The same move can be performed with the Category field in the inline
-editor. Select the pencil in a category heading to rename that category.
+category, including across followed configuration files. The same move can be
+performed with the Category field in the inline editor. Select the pencil in a
+category heading to rename that category.
 
 Native compositor actions remain intact. Fields that cannot be rewritten
 safely are disabled instead of being guessed. Generated, ranged, or otherwise

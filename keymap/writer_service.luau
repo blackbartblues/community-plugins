@@ -445,6 +445,50 @@ local function shellQuote(value)
 	return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
+local function environment(name)
+	if type(noctalia.getenv) ~= "function" then return "" end
+	local value = noctalia.getenv(name)
+	return type(value) == "string" and value or ""
+end
+
+-- Noctalia is often started without HYPRLAND_INSTANCE_SIGNATURE (for example
+-- from a systemd user unit). In that environment plain `hyprctl reload` cannot
+-- reach Hyprland. Resolve the same runtime instance as the reader service so a
+-- successful write is not immediately rolled back because only reload failed.
+local function hyprlandReloadCommand()
+	if environment("HYPRLAND_INSTANCE_SIGNATURE") ~= "" then
+		return FORMATS.Hyprland.reloadCommand
+	end
+	if type(noctalia.listDir) ~= "function" then return FORMATS.Hyprland.reloadCommand end
+	local runtime = environment("XDG_RUNTIME_DIR")
+	if runtime == "" then return FORMATS.Hyprland.reloadCommand end
+	local root = runtime:gsub("/+$", "") .. "/hypr"
+	local entries = noctalia.listDir(root)
+	if type(entries) ~= "table" then return FORMATS.Hyprland.reloadCommand end
+
+	local waylandDisplay = environment("WAYLAND_DISPLAY")
+	local fallback = nil
+	for _, name in ipairs(entries) do
+		if type(name) == "string" and name:match("^[%w_.%-]+$") then
+			local lock = noctalia.readFile(root .. "/" .. name .. "/hyprland.lock")
+			if type(lock) == "string" and #lock <= 4096 then
+				fallback = fallback or name
+				local socket = lock:match("^[^\r\n]*[\r\n]+([^\r\n]+)")
+				if waylandDisplay ~= "" and socket == waylandDisplay then
+					return "hyprctl -i " .. shellQuote(name) .. " reload"
+				end
+			end
+		end
+	end
+	if fallback ~= nil then return "hyprctl -i " .. shellQuote(fallback) .. " reload" end
+	return FORMATS.Hyprland.reloadCommand
+end
+
+local function requestReloadCommand(request)
+	if request.compositor == "Hyprland" then return hyprlandReloadCommand() end
+	return request.format.reloadCommand
+end
+
 local function rollbackTransaction(transaction)
 	if transaction.rootWritten then
 		local current = noctalia.readFile(transaction.source)
@@ -475,7 +519,7 @@ local function publishFailureAfterRollback(request, transaction, errorCode, relo
 	if reloadOld and rolledBack then
 		-- A failed reload may still have applied part of the candidate. Restore the
 		-- previous on-disk state and ask the compositor to read it once more.
-		local started = noctalia.runAsync(request.format.reloadCommand, function(result)
+		local started = noctalia.runAsync(requestReloadCommand(request), function(result)
 			local recovered = result.timedOut ~= true and result.exitCode == 0
 			publishOperationResult(
 				request, false, recovered and errorCode or "recovery_reload_failed", transaction.managedPath
@@ -500,7 +544,7 @@ local function finishSuccess(request, managedPath)
 end
 
 local function reloadAndFinish(request, transaction)
-	local started = noctalia.runAsync(request.format.reloadCommand, function(result)
+	local started = noctalia.runAsync(requestReloadCommand(request), function(result)
 		if result.timedOut == true then
 			publishFailureAfterRollback(request, transaction, "reload_timeout", true)
 			return
@@ -550,7 +594,7 @@ end
 local function publishFileSetFailure(request, files, errorCode, reloadOld)
 	local rolledBack = rollbackFileSet(files)
 	if reloadOld and rolledBack then
-		local started = noctalia.runAsync(request.format.reloadCommand, function(result)
+		local started = noctalia.runAsync(requestReloadCommand(request), function(result)
 			local recovered = result.timedOut ~= true and result.exitCode == 0
 			publishUpdateResult(
 				request.request_id, false,
@@ -571,7 +615,7 @@ local function publishFileSetFailure(request, files, errorCode, reloadOld)
 end
 
 local function reloadFileSetAndFinish(request, files)
-	local started = noctalia.runAsync(request.format.reloadCommand, function(result)
+	local started = noctalia.runAsync(requestReloadCommand(request), function(result)
 		if result.timedOut == true then
 			publishFileSetFailure(request, files, "reload_timeout", true)
 			return
@@ -821,7 +865,7 @@ local function reorderLineRanges(content, target, anchor, placement, replacement
 	if anchorFirst < 1 or anchorLast < anchorFirst or anchorLast > #lines then
 		return nil, "anchor_range_invalid"
 	end
-	if not (targetLast < anchorFirst or anchorLast < targetFirst) then
+	if target.source == anchor.source and not (targetLast < anchorFirst or anchorLast < targetFirst) then
 		return nil, "target_anchor_overlap"
 	end
 
@@ -859,6 +903,17 @@ local function reorderLineRanges(content, target, anchor, placement, replacement
 	for index = 1, insertionIndex - 1 do output[#output + 1] = remaining[index] end
 	for _, line in ipairs(targetLines) do output[#output + 1] = line end
 	for index = insertionIndex, #remaining do output[#output + 1] = remaining[index] end
+	return table.concat(output, "\n") .. (trailingNewline and "\n" or ""), nil
+end
+
+local function insertLineRange(content, lineNumber, snippet)
+	local lines, trailingNewline = splitLines(content)
+	if lineNumber < 1 or lineNumber > #lines + 1 then return nil, "anchor_range_invalid" end
+	local insertedLines = splitLines(snippet)
+	local output = {}
+	for index = 1, lineNumber - 1 do output[#output + 1] = lines[index] end
+	for _, line in ipairs(insertedLines) do output[#output + 1] = line end
+	for index = lineNumber, #lines do output[#output + 1] = lines[index] end
 	return table.concat(output, "\n") .. (trailingNewline and "\n" or ""), nil
 end
 
@@ -1257,6 +1312,79 @@ local function processValidatedReorder(request, target, anchor)
 	if contentFingerprint(tostring(anchor.raw_snippet or "")) ~= tostring(anchor.fingerprint or "") then
 		publishUpdateResult(request.request_id, false, "anchor_changed", anchor.source)
 		busy = false
+		return
+	end
+	if target.source ~= anchor.source then
+		local anchorContent = noctalia.readFile(anchor.source)
+		if type(anchorContent) ~= "string" then
+			publishUpdateResult(request.request_id, false, "source_unreadable", anchor.source)
+			busy = false
+			return
+		end
+		if #anchorContent > MAX_ROOT_BYTES then
+			publishUpdateResult(request.request_id, false, "source_too_large", anchor.source)
+			busy = false
+			return
+		end
+		local anchorCurrent = table.concat(
+			splitLines(anchorContent), "\n", tonumber(anchor.start_line), tonumber(anchor.end_line)
+		)
+		if anchorCurrent ~= tostring(anchor.raw_snippet or "")
+			or contentFingerprint(anchorCurrent) ~= tostring(anchor.fingerprint or "") then
+			publishUpdateResult(request.request_id, false, "anchor_changed", anchor.source)
+			busy = false
+			return
+		end
+
+		local targetUpdated, removeError = replaceLineRange(
+			targetContent, tonumber(target.start_line), tonumber(target.end_line),
+			tostring(target.raw_snippet or ""), ""
+		)
+		if targetUpdated == nil then
+			publishUpdateResult(request.request_id, false, removeError, target.source)
+			busy = false
+			return
+		end
+		local bindSnippet = splitBindCategoryMarker(request.compositor, tostring(target.raw_snippet or ""))
+		local replacementRaw = withBindCategoryMarker(request.compositor, bindSnippet, request.category, true)
+		local insertionLine = request.placement == "before"
+			and tonumber(anchor.start_line) or tonumber(anchor.end_line) + 1
+		local anchorUpdated, insertError = insertLineRange(anchorContent, insertionLine, replacementRaw)
+		if anchorUpdated == nil then
+			publishUpdateResult(request.request_id, false, insertError, anchor.source)
+			busy = false
+			return
+		end
+		if #targetUpdated > MAX_ROOT_BYTES or #anchorUpdated > MAX_ROOT_BYTES then
+			publishUpdateResult(request.request_id, false, "source_too_large", target.source)
+			busy = false
+			return
+		end
+		local files = {
+			{ path = target.source, old = targetContent, new = targetUpdated, written = false },
+			{ path = anchor.source, old = anchorContent, new = anchorUpdated, written = false },
+		}
+		for _, file in ipairs(files) do
+			if noctalia.readFile(file.path) ~= file.old then
+				publishUpdateResult(request.request_id, false, "target_changed", file.path)
+				busy = false
+				return
+			end
+		end
+		for _, file in ipairs(files) do
+			local ok = atomicWrite(file.path, file.new)
+			if ok ~= true then
+				local rolledBack = rollbackFileSet(files)
+				publishUpdateResult(
+					request.request_id, false,
+					rolledBack and "source_write_failed" or "rollback_failed", file.path
+				)
+				busy = false
+				return
+			end
+			file.written = true
+		end
+		verifyFileSetAndReload(request, files)
 		return
 	end
 	local replacementRaw = tostring(target.raw_snippet or "")
@@ -1717,10 +1845,6 @@ local function processReorderRequest(raw, target, anchor, currentCategory, ancho
 		publishUpdateResult(requestId, false, "target_not_editable", tostring(target.source or ""))
 		return
 	end
-	if target.source ~= anchor.source then
-		publishUpdateResult(requestId, false, "different_source", target.source)
-		return
-	end
 	local currentCategoryName = type(currentCategory) == "table" and tostring(currentCategory.name or "") or ""
 	local anchorCategoryName = type(anchorCategory) == "table" and tostring(anchorCategory.name or "") or ""
 	local category
@@ -1736,7 +1860,7 @@ local function processReorderRequest(raw, target, anchor, currentCategory, ancho
 	end
 	local targetFirst, targetLast = tonumber(target.start_line), tonumber(target.end_line)
 	local anchorFirst, anchorLast = tonumber(anchor.start_line), tonumber(anchor.end_line)
-	if not (targetLast < anchorFirst or anchorLast < targetFirst) then
+	if target.source == anchor.source and not (targetLast < anchorFirst or anchorLast < targetFirst) then
 		publishUpdateResult(requestId, false, "target_anchor_overlap", target.source)
 		return
 	end
@@ -1751,7 +1875,7 @@ local function processReorderRequest(raw, target, anchor, currentCategory, ancho
 	end
 	busy = true
 	local preflight = "[ ! -L " .. shellQuote(request.source) .. " ] && [ ! -L "
-		.. shellQuote(target.source) .. " ]"
+		.. shellQuote(target.source) .. " ] && [ ! -L " .. shellQuote(anchor.source) .. " ]"
 	local started = noctalia.runAsync(preflight, function(result)
 		if result.timedOut == true or result.exitCode ~= 0 then
 			publishUpdateResult(requestId, false, "symlink_unsupported", target.source)

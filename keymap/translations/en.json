@@ -82,6 +82,8 @@
     "close": "Close",
     "command_library": {
       "all_categories": "All categories",
+      "all_modules": "All plugins / compositors",
+      "all_origins": "All origins",
       "all_readiness": "All commands",
       "all_sources": "All sources",
       "categories": {
@@ -116,10 +118,17 @@
       "no_results": "No commands match these filters.",
       "open": "Commands",
       "open_hint": "Browse Noctalia commands and native actions for the active compositor",
+      "origins": {
+        "community": "Community",
+        "compositor": "Compositor",
+        "core": "Noctalia Core",
+        "development": "Development",
+        "official": "Official"
+      },
       "placeholder_hint": "Replace every placeholder in double braces before saving.",
       "ready": "Ready",
       "requires_input": "Needs input",
-      "search_placeholder": "Search commands, actions, or categories",
+      "search_placeholder": "Search commands, plugins, origins, or categories",
       "showing": "Showing {shown} of {total} matching commands",
       "sources": {
         "hyprland": "Hyprland",
@@ -127,6 +136,8 @@
         "niri": "Niri",
         "noctalia": "Noctalia"
       },
+      "suggestions": "Command suggestions",
+      "syntax_correction": "Correct Noctalia IPC prefix",
       "title": "Known commands",
       "use": "Use"
     },
@@ -166,6 +177,7 @@
         "file_too_large": "The managed keybinding file is too large.",
         "hidden_block_invalid": "The hidden shortcut block is incomplete or damaged, so it was left unchanged.",
         "integrate_failed": "The managed file could not be included from the main configuration.",
+        "invalid_command": "The command must be a single line without control characters.",
         "invalid_command_kind": "The selected command type is not supported.",
         "invalid_compositor": "The active compositor is not supported by the writer.",
         "invalid_operation": "The requested shortcut operation is not supported.",

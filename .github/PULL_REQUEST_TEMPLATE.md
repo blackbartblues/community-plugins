@@ -41,6 +41,8 @@
       every entry id and dependency, and includes exact panel IPC commands and launcher prefixes where applicable.
 - [ ] I created `thumbnail.webp` with the [thumbnail generator](https://assets.noctalia.dev/plugins/thumbnail-generator.html).
 - [ ] `version` follows semver and is bumped in this PR; `plugin_api` is the oldest API level this plugin requires.
+- [ ] Every stable, user-facing `onIpc` action is declared with `[[command]]` in `plugin.toml`; internal service events
+      are not exposed as commands.
 - [ ] Every non-English translation in this PR uses a locale supported by Noctalia core, and I can read, write, and
       understand that language well enough to review and maintain it (no unreviewed machine/LLM translations).
 - [ ] I did not edit `catalog.toml`; CI generates it.

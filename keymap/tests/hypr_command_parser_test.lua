@@ -1,6 +1,8 @@
 local stateValues = {}
 local watchers = {}
 local sourcePath = "/tmp/keybind-test/keybind.lua"
+local runtimePath = "/run/user/1000/hypr"
+local instance = "fixture-instance_123"
 local source = table.concat({
 	"-- 1. Applications",
 	[[hl.bind("SUPER + RETURN", hl.dsp.exec_cmd("kitty"), { description = "Terminal" })]],
@@ -24,12 +26,24 @@ noctalia = {
 		}
 		return values[key]
 	end,
-	getenv = function() return "" end,
+	getenv = function(key)
+		if key == "XDG_RUNTIME_DIR" then return "/run/user/1000" end
+		if key == "WAYLAND_DISPLAY" then return "wayland-fixture" end
+		return ""
+	end,
 	expandPath = function(path) return path end,
-	readFile = function(path) return path == sourcePath and source or nil end,
+	readFile = function(path)
+		if path == sourcePath then return source end
+		if path == runtimePath .. "/" .. instance .. "/hyprland.lock" then
+			return "4321\nwayland-fixture\n"
+		end
+		return nil
+	end,
 	fileExists = function(path) return path == sourcePath end,
+	listDir = function(path) return path == runtimePath and { instance } or nil end,
 	commandExists = function(command) return command == "hyprctl" end,
-	runAsync = function(_command, callback, _timeout)
+	runAsync = function(command, callback, _timeout)
+		assert(command == "hyprctl -i " .. instance .. " binds -j", "Hyprland instance was not selected")
 		callback({ exitCode = 0, timedOut = false, stdout = "live-binds" })
 		return true
 	end,

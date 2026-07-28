@@ -15,6 +15,7 @@ from typing import Any
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 LAUNCHER_PREFIX_RE = re.compile(r"^[a-z]+$")
+COMMAND_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 DESCRIPTION_MAX_CHARS = 120
 ALLOWED_TAGS = {
     "ai",
@@ -151,6 +152,7 @@ PANEL_POSITIONS = {
 
 ROOT_FIELDS = set(ROOT_STRING_FIELDS) | set(ROOT_ARRAY_FIELDS) | set(ENTRY_TYPES) | {
     "setting",
+    "command",
     "deprecated",
     "plugin_api",
 }
@@ -193,6 +195,7 @@ SETTING_FIELDS = {
 }
 OPTION_FIELDS = {"value", "label_key"}
 VISIBLE_WHEN_FIELDS = {"key", "values"}
+COMMAND_FIELDS = {"id", "entry", "target", "event", "payload", "description", "category"}
 
 # Raw HTML is not supported on plugin pages. Markdown autolinks such as
 # <https://example.com> do not match this expression.
@@ -908,6 +911,66 @@ class Validator:
                 "must define at least one entry: widget, panel, shortcut, desktop_widget, launcher_provider, or service",
             )
 
+    def validate_commands(self, manifest_path: Path, manifest: dict[str, Any]) -> None:
+        commands = manifest.get("command", [])
+        if not isinstance(commands, list):
+            self.add_error(manifest_path, "'command' must be an array of tables")
+            return
+
+        entry_ids = {
+            entry["id"]
+            for entry_type in ENTRY_TYPES
+            for entry in manifest.get(entry_type, [])
+            if isinstance(entry, dict) and is_non_empty_string(entry.get("id"))
+        }
+        seen_ids: set[str] = set()
+        for index, command in enumerate(commands):
+            context = f"command[{index}]"
+            if not isinstance(command, dict):
+                self.add_context_error(manifest_path, context, "must be a table")
+                continue
+
+            for field in sorted(set(command) - COMMAND_FIELDS):
+                self.add_context_error(manifest_path, context, f"unknown field '{field}'")
+
+            for field in ("id", "entry", "event"):
+                value = command.get(field)
+                if not is_non_empty_string(value):
+                    self.add_context_error(manifest_path, context, f"{field} must be a non-empty string")
+                elif not COMMAND_TOKEN_RE.fullmatch(value):
+                    self.add_context_error(
+                        manifest_path,
+                        context,
+                        f"{field} must match {COMMAND_TOKEN_RE.pattern}",
+                    )
+
+            command_id = command.get("id")
+            if is_non_empty_string(command_id):
+                if command_id in seen_ids:
+                    self.add_context_error(manifest_path, context, f"duplicate command id '{command_id}'")
+                seen_ids.add(command_id)
+
+            entry_id = command.get("entry")
+            if is_non_empty_string(entry_id) and entry_id not in entry_ids:
+                self.add_context_error(
+                    manifest_path,
+                    context,
+                    f"entry references unknown plugin entry '{entry_id}'",
+                )
+
+            for field in ("target", "category"):
+                if field in command and not is_non_empty_string(command[field]):
+                    self.add_context_error(manifest_path, context, f"{field} must be a non-empty string")
+
+            for field in ("payload", "description"):
+                if field in command and not isinstance(command[field], str):
+                    self.add_context_error(manifest_path, context, f"{field} must be a string")
+
+            for field in ("target", "payload", "description", "category"):
+                value = command.get(field)
+                if isinstance(value, str) and any(ord(char) < 32 or ord(char) == 127 for char in value):
+                    self.add_context_error(manifest_path, context, f"{field} must not contain control characters")
+
     def validate_default(
         self,
         manifest_path: Path,
@@ -1376,6 +1439,7 @@ class Validator:
             )
 
         self.validate_entries(manifest_path, manifest, translations)
+        self.validate_commands(manifest_path, manifest)
 
     def validate_layout(self) -> None:
         # Every plugin is one top-level directory. A manifest anywhere else (repo root, or

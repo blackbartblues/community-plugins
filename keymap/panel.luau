@@ -37,6 +37,8 @@ local CREATE_REQUEST_KEY = "keymap.create_request"
 local CREATE_RESULT_KEY = "keymap.create_result"
 local UPDATE_REQUEST_KEY = "keymap.update_request"
 local UPDATE_RESULT_KEY = "keymap.update_result"
+local COMMAND_CATALOG_KEY = "keymap.runtime_command_catalog"
+local COMMAND_CATALOG_REFRESH_KEY = "keymap.catalog_refresh_request"
 
 local EMPTY_SNAPSHOT = {
   status = "idle",
@@ -74,10 +76,12 @@ local creatorBusy = false
 local creatorError = ""
 local commandLibraryOpen = false
 local commandLibraryQuery = ""
-local commandLibrarySourceIndex = 0
+local commandLibraryOriginIndex = 0
+local commandLibraryModuleIndex = 0
 local commandLibraryCategoryIndex = 0
 local commandLibraryReadinessIndex = 0
 local commandLibraryRevision = 0
+local runtimeCommandCatalog = { status = "idle", entries = {} }
 local formMode = "create"
 local editorMode = false
 local editingBindId = ""
@@ -1251,10 +1255,30 @@ local function commandLibraryCategoryLabel(category)
   return translated ~= key and translated or category
 end
 
-local function commandLibrarySourceIds()
-  local result = { "", "noctalia" }
-  local compositorSource = commandLibraryCompositorSource()
-  if formMode ~= "edit" and compositorSource ~= "" then result[#result + 1] = compositorSource end
+local function commandLibraryEntries()
+  -- Noctalia and plugin commands are runtime-only. The bundled catalog holds
+  -- native compositor actions, whose APIs do not expose an enumerable registry.
+  local runtimeReady = runtimeCommandCatalog.status == "ready"
+    and type(runtimeCommandCatalog.entries) == "table"
+  local result = {}
+  if runtimeReady then
+    for _, entry in ipairs(runtimeCommandCatalog.entries) do
+      local enriched = {}
+      for key, value in pairs(entry) do enriched[key] = value end
+      enriched.origin = asString(enriched.origin, "core")
+      enriched.module = asString(enriched.module, "noctalia")
+      enriched.module_name = asString(enriched.module_name, commandLibrarySourceLabel(enriched.module))
+      result[#result + 1] = enriched
+    end
+  end
+  for _, entry in ipairs(asArray(COMMAND_LIBRARY.entries)) do
+    local enriched = {}
+    for key, value in pairs(entry) do enriched[key] = value end
+    enriched.origin = "compositor"
+    enriched.module = asString(entry.source)
+    enriched.module_name = commandLibrarySourceLabel(enriched.module)
+    result[#result + 1] = enriched
+  end
   return result
 end
 
@@ -1265,13 +1289,65 @@ local function commandLibraryEntryAllowed(entry)
     and entry.source == commandLibraryCompositorSource()
 end
 
+local function commandLibraryOriginLabel(origin)
+  local key = "panel.command_library.origins." .. origin
+  local translated = tr(key)
+  return translated ~= key and translated or origin
+end
+
+local function commandLibraryOriginIds()
+  local preferred = { "compositor", "community", "official", "development", "core" }
+  local present = {}
+  for _, entry in ipairs(commandLibraryEntries()) do
+    if commandLibraryEntryAllowed(entry) then present[asString(entry.origin, "core")] = true end
+  end
+  local result = {}
+  for _, origin in ipairs(preferred) do
+    if present[origin] then
+      result[#result + 1] = origin
+      present[origin] = nil
+    end
+  end
+  local remaining = {}
+  for origin, _ in pairs(present) do remaining[#remaining + 1] = origin end
+  table.sort(remaining)
+  for _, origin in ipairs(remaining) do result[#result + 1] = origin end
+  return result
+end
+
+local function commandLibrarySelectedOrigin()
+  return commandLibraryOriginIds()[commandLibraryOriginIndex] or ""
+end
+
+local function commandLibraryModuleRecords()
+  local selectedOrigin = commandLibrarySelectedOrigin()
+  local records = {}
+  for _, entry in ipairs(commandLibraryEntries()) do
+    local moduleId = asString(entry.module)
+    if commandLibraryEntryAllowed(entry) and moduleId ~= ""
+      and (selectedOrigin == "" or entry.origin == selectedOrigin) then
+      records[moduleId] = asString(entry.module_name, moduleId)
+    end
+  end
+  local result = {}
+  for id, name in pairs(records) do result[#result + 1] = { id = id, name = name } end
+  table.sort(result, function(left, right) return normalized(left.name) < normalized(right.name) end)
+  return result
+end
+
+local function commandLibrarySelectedModule()
+  local record = commandLibraryModuleRecords()[commandLibraryModuleIndex]
+  return type(record) == "table" and record.id or ""
+end
+
 local function commandLibraryCategoryIds()
-  local sourceIds = commandLibrarySourceIds()
-  local selectedSource = sourceIds[commandLibrarySourceIndex + 1] or ""
+  local selectedOrigin = commandLibrarySelectedOrigin()
+  local selectedModule = commandLibrarySelectedModule()
   local seen = {}
-  for _, entry in ipairs(asArray(COMMAND_LIBRARY.entries)) do
+  for _, entry in ipairs(commandLibraryEntries()) do
     if commandLibraryEntryAllowed(entry) and type(entry.category) == "string"
-      and (selectedSource == "" or entry.source == selectedSource) then
+      and (selectedOrigin == "" or entry.origin == selectedOrigin)
+      and (selectedModule == "" or entry.module == selectedModule) then
       seen[entry.category] = true
     end
   end
@@ -1283,16 +1359,48 @@ local function commandLibraryCategoryIds()
   return result
 end
 
+local function editDistance(left, right, limit)
+  if left == right then return 0 end
+  if math.abs(#left - #right) > limit then return limit + 1 end
+  local previous = {}
+  for column = 0, #right do previous[column] = column end
+  for row = 1, #left do
+    local current = { [0] = row }
+    local rowMinimum = current[0]
+    for column = 1, #right do
+      local substitution = previous[column - 1]
+        + (left:sub(row, row) == right:sub(column, column) and 0 or 1)
+      current[column] = math.min(previous[column] + 1, current[column - 1] + 1, substitution)
+      rowMinimum = math.min(rowMinimum, current[column])
+    end
+    if rowMinimum > limit then return limit + 1 end
+    previous = current
+  end
+  return previous[#right]
+end
+
+local function fuzzyTermMatches(haystack, term)
+  if term == "" or haystack:find(term, 1, true) ~= nil then return true end
+  local limit = #term <= 3 and 1 or 2
+  for word in haystack:gmatch("[%w_./:%-]+") do
+    if word:sub(1, #term) == term or editDistance(term, word, limit) <= limit then return true end
+  end
+  return false
+end
+
 local function commandLibraryFilteredEntries()
-  local sourceIds = commandLibrarySourceIds()
-  local selectedSource = sourceIds[commandLibrarySourceIndex + 1] or ""
+  local selectedOrigin = commandLibrarySelectedOrigin()
+  local selectedModule = commandLibrarySelectedModule()
   local categoryIds = commandLibraryCategoryIds()
   local selectedCategory = categoryIds[commandLibraryCategoryIndex] or ""
   local query = normalized(commandLibraryQuery)
+  local queryTerms = {}
+  for term in query:gmatch("%S+") do queryTerms[#queryTerms + 1] = term end
   local result = {}
-  for _, entry in ipairs(asArray(COMMAND_LIBRARY.entries)) do
+  for _, entry in ipairs(commandLibraryEntries()) do
     if commandLibraryEntryAllowed(entry)
-      and (selectedSource == "" or entry.source == selectedSource)
+      and (selectedOrigin == "" or entry.origin == selectedOrigin)
+      and (selectedModule == "" or entry.module == selectedModule)
       and (selectedCategory == "" or entry.category == selectedCategory) then
       local needsInput = asString(entry.template):find("{{", 1, true) ~= nil
       local readinessMatches = commandLibraryReadinessIndex == 0
@@ -1301,9 +1409,18 @@ local function commandLibraryFilteredEntries()
       local haystack = normalized(table.concat({
         asString(entry.id), asString(entry.template), asString(entry.usage),
         commandLibrarySourceLabel(asString(entry.source)),
+        commandLibraryOriginLabel(asString(entry.origin)),
+        asString(entry.module), asString(entry.module_name),
         commandLibraryCategoryLabel(asString(entry.category)),
       }, " "))
-      if readinessMatches and (query == "" or haystack:find(query, 1, true) ~= nil) then
+      local queryMatches = true
+      for _, term in ipairs(queryTerms) do
+        if not fuzzyTermMatches(haystack, term) then
+          queryMatches = false
+          break
+        end
+      end
+      if readinessMatches and queryMatches then
         result[#result + 1] = entry
       end
     end
@@ -1311,13 +1428,114 @@ local function commandLibraryFilteredEntries()
   return result
 end
 
+local function commandSuggestions()
+  if commandLibraryOpen or (formMode == "edit" and editingCapabilities.command ~= true) then return {} end
+  local query = normalized(creatorCommand)
+  if #query < 2 or query:find("{{", 1, true) ~= nil then return {} end
+
+  local result = {}
+  local correctedQuery = query
+  local first, second, remainder = query:match("^(%S+)%s+(%S+)%s*(.*)$")
+  local syntaxCorrection = false
+  if query == "msg" or editDistance(query, "msg", 1) <= 1 then
+    correctedQuery = "noctalia msg"
+    syntaxCorrection = query ~= correctedQuery
+  elseif first == "noctalia" and second ~= nil and editDistance(second, "msg", 1) <= 1 then
+    correctedQuery = "noctalia msg" .. (remainder ~= "" and (" " .. remainder) or "")
+    syntaxCorrection = second ~= "msg"
+  end
+  if syntaxCorrection then
+    result[#result + 1] = {
+      id = "syntax/noctalia-msg", template = correctedQuery,
+      usage = tr("panel.command_library.syntax_correction"), kind = "shell",
+    }
+  end
+
+  local scored = {}
+  local terms = {}
+  for term in correctedQuery:gmatch("%S+") do terms[#terms + 1] = term end
+  for _, entry in ipairs(commandLibraryEntries()) do
+    if commandLibraryEntryAllowed(entry) then
+      local template = normalized(entry.template)
+      if template ~= query and template ~= correctedQuery then
+        local score = nil
+        if template:sub(1, #correctedQuery) == correctedQuery then
+          score = #template - #correctedQuery
+        else
+          local matches = true
+          for _, term in ipairs(terms) do
+            if not fuzzyTermMatches(template, term) then matches = false break end
+          end
+          if matches then score = 100 + #template end
+        end
+        if score ~= nil then scored[#scored + 1] = { score = score, entry = entry } end
+      end
+    end
+  end
+  table.sort(scored, function(left, right)
+    if left.score ~= right.score then return left.score < right.score end
+    return normalized(left.entry.template) < normalized(right.entry.template)
+  end)
+  local limit = math.max(0, 5 - #result)
+  for index = 1, math.min(limit, #scored) do result[#result + 1] = scored[index].entry end
+  return result
+end
+
+local function commandSuggestionsNode()
+  local suggestions = commandSuggestions()
+  if #suggestions == 0 then return ui.row({ visible = false }, {}) end
+  local rows = {
+    ui.label({
+      text = tr("panel.command_library.suggestions"), color = "on_surface_variant",
+      fontSize = 9, fontWeight = "bold",
+    }),
+  }
+  for _, suggestion in ipairs(suggestions) do
+    local selectedSuggestion = suggestion
+    local useSuggestion = function()
+      creatorCommand = asString(selectedSuggestion.template)
+      creatorCommandKind = asString(selectedSuggestion.kind, "shell")
+      creatorLibraryEntryId = asString(selectedSuggestion.id):find("^syntax/")
+        and "" or asString(selectedSuggestion.id)
+      creatorError = ""
+      creatorRevision += 1
+      render()
+    end
+    rows[#rows + 1] = ui.row({ gap = 6, align = "center" }, {
+      ui.glyph({ name = "sparkles", size = 13, color = "tertiary" }),
+      ui.column({ gap = 1, flexGrow = 1 }, {
+        ui.label({ text = asString(suggestion.template), fontSize = 9, maxLines = 1 }),
+        ui.label({
+          text = asString(suggestion.usage), color = "on_surface_variant", fontSize = 8, maxLines = 1,
+        }),
+      }),
+      ui.button({
+        text = tr("panel.command_library.use"), variant = "ghost", controlSize = "sm",
+        onClick = useSuggestion,
+      }),
+    })
+  end
+  return ui.column({
+    key = "command-suggestions-" .. tostring(creatorRevision),
+    gap = 3, paddingH = 8, paddingV = 6, radius = 7,
+    fill = colorWithOpacity(cfg("card_color"), "surface", 0.25),
+    border = "tertiary", borderWidth = 1,
+  }, rows)
+end
+
 local function commandLibraryNode()
   if not commandLibraryOpen then return ui.row({ visible = false }, {}) end
-  local sourceIds = commandLibrarySourceIds()
-  if commandLibrarySourceIndex >= #sourceIds then commandLibrarySourceIndex = 0 end
-  local sourceOptions = { tr("panel.command_library.all_sources") }
-  for index = 2, #sourceIds do
-    sourceOptions[#sourceOptions + 1] = commandLibrarySourceLabel(sourceIds[index])
+  local originIds = commandLibraryOriginIds()
+  if commandLibraryOriginIndex > #originIds then commandLibraryOriginIndex = 0 end
+  local originOptions = { tr("panel.command_library.all_origins") }
+  for _, origin in ipairs(originIds) do
+    originOptions[#originOptions + 1] = commandLibraryOriginLabel(origin)
+  end
+  local moduleRecords = commandLibraryModuleRecords()
+  if commandLibraryModuleIndex > #moduleRecords then commandLibraryModuleIndex = 0 end
+  local moduleOptions = { tr("panel.command_library.all_modules") }
+  for _, module in ipairs(moduleRecords) do
+    moduleOptions[#moduleOptions + 1] = module.name
   end
   local categoryIds = commandLibraryCategoryIds()
   if commandLibraryCategoryIndex > #categoryIds then commandLibraryCategoryIndex = 0 end
@@ -1327,7 +1545,7 @@ local function commandLibraryNode()
   end
   local matches = commandLibraryFilteredEntries()
   local resultNodes = {}
-  local visibleCount = math.min(#matches, 6)
+  local visibleCount = #matches
   for index = 1, visibleCount do
     local entry = matches[index]
     local selectedEntry = entry
@@ -1348,7 +1566,11 @@ local function commandLibraryNode()
       ui.column({ gap = 1, flexGrow = 1 }, {
         ui.label({ text = asString(entry.usage, asString(entry.id)), fontSize = 10, maxLines = 1 }),
         ui.label({
-          text = commandLibrarySourceLabel(asString(entry.source)) .. " · "
+          text = asString(entry.template), color = "on_surface_variant", fontSize = 9, maxLines = 1,
+        }),
+        ui.label({
+          text = commandLibraryOriginLabel(asString(entry.origin)) .. " · "
+            .. asString(entry.module_name, asString(entry.module)) .. " · "
             .. commandLibraryCategoryLabel(asString(entry.category)),
           color = "on_surface_variant", fontSize = 9, maxLines = 1,
         }),
@@ -1380,16 +1602,32 @@ local function commandLibraryNode()
         onClick = "onCommandLibraryUseCustom",
       }),
     }),
-    ui.input({
-      key = "command-library-search-" .. tostring(commandLibraryRevision),
-      value = commandLibraryQuery, placeholder = tr("panel.command_library.search_placeholder"),
-      controlSize = "sm", onChange = "onCommandLibraryQueryChanged",
+    ui.row({ gap = 6, align = "center" }, {
+      ui.glyph({ name = "search", size = 16, color = "on_surface_variant" }),
+      ui.input({
+        key = "command-library-search-" .. tostring(commandLibraryRevision),
+        value = commandLibraryQuery, placeholder = tr("panel.command_library.search_placeholder"),
+        focus = true, flexGrow = 1, controlSize = "sm",
+        onChange = "onCommandLibraryQueryChanged",
+        onSubmit = "onCommandLibraryQueryChanged",
+      }),
+      ui.button({
+        glyph = "x", variant = "ghost", controlSize = "sm",
+        visible = commandLibraryQuery ~= "", tooltip = tr("panel.clear_search"),
+        onClick = "onCommandLibraryClearQuery",
+      }),
     }),
     ui.row({ gap = 6, align = "center" }, {
       ui.select({
-        options = sourceOptions, selectedIndex = commandLibrarySourceIndex,
-        flexGrow = 1, controlSize = "sm", onChange = "onCommandLibrarySourceChanged",
+        options = originOptions, selectedIndex = commandLibraryOriginIndex,
+        flexGrow = 1, controlSize = "sm", onChange = "onCommandLibraryOriginChanged",
       }),
+      ui.select({
+        options = moduleOptions, selectedIndex = commandLibraryModuleIndex,
+        flexGrow = 1, controlSize = "sm", onChange = "onCommandLibraryModuleChanged",
+      }),
+    }),
+    ui.row({ gap = 6, align = "center" }, {
       ui.select({
         options = categoryOptions, selectedIndex = commandLibraryCategoryIndex,
         flexGrow = 1, controlSize = "sm", onChange = "onCommandLibraryCategoryChanged",
@@ -1407,7 +1645,7 @@ local function commandLibraryNode()
       text = tr("panel.command_library.showing", { shown = visibleCount, total = #matches }),
       color = "on_surface_variant", fontSize = 9,
     }),
-    ui.column({ gap = 3 }, resultNodes),
+    ui.column({ key = "command-library-results", gap = 3 }, resultNodes),
   })
 end
 
@@ -1543,6 +1781,7 @@ local function creatorForm(index)
         onClick = "onCommandLibraryToggle",
       }),
     }),
+    commandSuggestionsNode(),
     (not isEditing or editingCapabilities.command == true) and ui.row({ gap = 6, align = "center" }, {
       ui.label({
         text = tr(creatorCommandKind == "native"
@@ -1992,7 +2231,8 @@ local function openBindEditor(bind, categoryName)
   creatorOpen = true
   commandLibraryOpen = false
   commandLibraryQuery = ""
-  commandLibrarySourceIndex = 0
+  commandLibraryOriginIndex = 0
+  commandLibraryModuleIndex = 0
   commandLibraryCategoryIndex = 0
   commandLibraryReadinessIndex = 0
   commandLibraryRevision += 1
@@ -2385,7 +2625,11 @@ local function categoryCard(category, columnCount)
     border = "outline",
     borderWidth = 1,
   }
-  if editorMode and categoryCanAcceptDrop(categoryName) then
+  -- Non-empty categories already have precise before/after insertion zones.
+  -- Wrapping the entire card in a catch-all drop zone lets the parent steal a
+  -- drop intended for the first row, which used to turn a reorder into a mere
+  -- category change. Keep the broad target only for genuinely empty groups.
+  if editorMode and #categoryBinds == 0 and categoryCanAcceptDrop(categoryName) then
     props.accepts = { DND_BIND_TYPE }
     props.value = categoryName
     props.onDrop = "onBindDropped"
@@ -2653,6 +2897,13 @@ render = function()
     body = statusBody(status, snapshot.error)
   elseif status == "loading" or status == "idle" then
     body = statusBody(status, "")
+  elseif creatorOpen and viewMode == "list" then
+    -- The creator and its command catalog share the panel's full content
+    -- viewport. Keeping one outer scroll avoids a small nested wheel target
+    -- and guarantees that a long catalog stays clipped to the panel.
+    body = ui.scroll({ flexGrow = 1 }, {
+      creatorForm(keyboardIndex()),
+    })
   elseif viewMode == "keyboard" then
     body = keyboardBody()
   else
@@ -2663,11 +2914,8 @@ render = function()
     header(),
     ui.separator({ orientation = "horizontal", color = "outline", opacity = 0.65 }),
   }
-  if viewMode == "list" then
+  if viewMode == "list" and not creatorOpen then
     children[#children + 1] = searchBar(categories)
-  end
-  if viewMode == "list" and creatorOpen and status == "ready" then
-    children[#children + 1] = creatorForm(keyboardIndex())
   end
   local warning = warningsBanner()
   if warning ~= nil and status == "ready" then
@@ -2692,6 +2940,11 @@ noctalia.state.watch(SNAPSHOT_KEY, function(value)
     snapshot = EMPTY_SNAPSHOT
   end
   render()
+end)
+
+noctalia.state.watch(COMMAND_CATALOG_KEY, function(value)
+  runtimeCommandCatalog = type(value) == "table" and value or { status = "idle", entries = {} }
+  if commandLibraryOpen then render() end
 end)
 
 noctalia.state.watch(CREATE_RESULT_KEY, function(result)
@@ -2751,6 +3004,9 @@ function onOpen(_context)
   keyboardLayoutId = KEYBOARD_LAYOUTS[configuredLayout] ~= nil and configuredLayout or "100"
   local current = noctalia.state.get(SNAPSHOT_KEY)
   snapshot = type(current) == "table" and current or EMPTY_SNAPSHOT
+  local currentCatalog = noctalia.state.get(COMMAND_CATALOG_KEY)
+  runtimeCommandCatalog = type(currentCatalog) == "table"
+    and currentCatalog or { status = "idle", entries = {} }
   searchQuery = ""
   searchRevision += 1
   if creatorBusy then
@@ -2836,7 +3092,8 @@ local function resetCreator()
   creatorError = ""
   commandLibraryOpen = false
   commandLibraryQuery = ""
-  commandLibrarySourceIndex = 0
+  commandLibraryOriginIndex = 0
+  commandLibraryModuleIndex = 0
   commandLibraryCategoryIndex = 0
   commandLibraryReadinessIndex = 0
   commandLibraryRevision += 1
@@ -2989,6 +3246,11 @@ end
 function onCommandLibraryToggle()
   if formMode == "edit" and editingCapabilities.command ~= true then return end
   commandLibraryOpen = not commandLibraryOpen
+  if commandLibraryOpen then
+    commandLibraryRevision += 1
+    local current = tonumber(noctalia.state.get(COMMAND_CATALOG_REFRESH_KEY)) or 0
+    noctalia.state.set(COMMAND_CATALOG_REFRESH_KEY, current + 1)
+  end
   creatorError = ""
   render()
 end
@@ -2998,8 +3260,21 @@ function onCommandLibraryQueryChanged(value)
   render()
 end
 
-function onCommandLibrarySourceChanged(index, _text)
-  commandLibrarySourceIndex = math.max(0, math.floor(tonumber(index) or 0))
+function onCommandLibraryClearQuery()
+  commandLibraryQuery = ""
+  commandLibraryRevision += 1
+  render()
+end
+
+function onCommandLibraryOriginChanged(index, _text)
+  commandLibraryOriginIndex = math.max(0, math.floor(tonumber(index) or 0))
+  commandLibraryModuleIndex = 0
+  commandLibraryCategoryIndex = 0
+  render()
+end
+
+function onCommandLibraryModuleChanged(index, _text)
+  commandLibraryModuleIndex = math.max(0, math.floor(tonumber(index) or 0))
   commandLibraryCategoryIndex = 0
   render()
 end
@@ -3027,7 +3302,10 @@ function onCommandLibraryUseCustom()
 end
 
 function onCreatorCommandChanged(value)
-  creatorCommand = asString(value)
+  -- The compositor formats written by Keymap are line based. Make pasted
+  -- multi-line commands explicit single-line shell commands instead of letting
+  -- an invisible control character fail later in the writer.
+  creatorCommand = asString(value):gsub("%c+", " ")
   creatorError = ""
   render()
 end
@@ -3190,11 +3468,6 @@ function onBindReordered(bindId, targetValue)
   local anchor, anchorCategory = findSnapshotBind(asString(anchorId))
   if bind == nil or anchor == nil or asString(bind.id) == asString(anchor.id)
     or not bindCategoryMovable(bind) or not bindCategoryMovable(anchor) then return end
-  if asString(bind.source) ~= asString(anchor.source) then
-    if bindCategory ~= anchorCategory then onBindDropped(bindId, anchorCategory) end
-    return
-  end
-
   creatorRequestCounter += 1
   local requestId = tostring(os.time()) .. "-reorder-" .. tostring(creatorRequestCounter)
   formMode = "edit"

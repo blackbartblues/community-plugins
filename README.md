@@ -79,6 +79,29 @@ noctalia msg plugins enable me/hello
 
 `.luau` edits hot-reload; manifest changes are picked up on the next config reload.
 
+### Public IPC commands
+
+If an entry handles user-facing `onIpc` events, declare each action in the
+manifest. This lets launchers, keybinding editors, and command palettes discover
+the plugin without scraping or hard-coding its Luau implementation:
+
+```toml
+[[command]]
+id = "cycle-output"
+entry = "service"
+target = "all" # optional; defaults to "all"
+event = "cycle-output"
+payload = "{{device}}" # optional; use visible placeholders for required input
+description = "Switch to the next audio output"
+category = "audio" # optional; defaults to "plugins"
+```
+
+Noctalia exposes enabled declarations through `noctalia msg plugins commands`.
+The example above produces the complete template
+`noctalia msg plugin <author/plugin>:service all cycle-output {{device}}`.
+Declare only stable, user-facing actions; internal refresh or coordination
+events are implementation details and do not belong in the command catalog.
+
 ### Editor setup
 
 `noctalia.d.luau` declares the whole plugin API, so luau-lsp gives you autocomplete and typo diagnostics. It lives in

@@ -2,6 +2,8 @@ local files = { ["command_library.json"] = "test-command-library" }
 local stateValues = {}
 local watchers = {}
 local commands = {}
+local environmentValues = {}
+local directoryEntries = {}
 local failure = {
 	preflight = false,
 	validator = false,
@@ -47,6 +49,8 @@ noctalia = {
 		files[path] = nil
 		return true
 	end,
+	getenv = function(name) return environmentValues[name] or "" end,
+	listDir = function(path) return directoryEntries[path] or {} end,
 	runAsync = function(command, callback, timeout)
 		commands[#commands + 1] = { command = command, timeout = timeout }
 		callback(commandResult(command))
@@ -139,6 +143,8 @@ local function reset(case)
 	files = {}
 	stateValues = {}
 	commands = {}
+	environmentValues = {}
+	directoryEntries = {}
 	failure = { preflight = false, validator = false, reloadOnce = false }
 	reloadAttempts = 0
 	local directory = "/tmp/keymap-create-test/" .. case.id
@@ -307,6 +313,21 @@ for _, case in ipairs(CASES) do
 	runHappyPath(case)
 	runVerifyRollback(case)
 	runReloadRollbackOnAppend(case)
+end
+
+do
+	local case = CASES[1]
+	reset(case)
+	environmentValues.XDG_RUNTIME_DIR = "/run/user/1000"
+	environmentValues.WAYLAND_DISPLAY = "wayland-7"
+	local instance = "abcdef0123456789_1234567890"
+	directoryEntries["/run/user/1000/hypr"] = { "stale-instance", instance }
+	files["/run/user/1000/hypr/stale-instance/hyprland.lock"] = "1\nwayland-2\n"
+	files["/run/user/1000/hypr/" .. instance .. "/hyprland.lock"] = "2\nwayland-7\n"
+	local result = submit(case, case.first, "hypr-detached-instance")
+	assert(result.ok == true, "detached Hyprland create failed")
+	assert(commands[3].command == "hyprctl -i '" .. instance .. "' reload",
+		"writer did not target the active Hyprland instance: " .. tostring(commands[3].command))
 end
 
 local NATIVE_CASES = {

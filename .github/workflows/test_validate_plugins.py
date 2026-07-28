@@ -87,6 +87,57 @@ class DescriptionTests(unittest.TestCase):
         self.assertIn("at or below 120", errors[0])
 
 
+class CommandDeclarationTests(unittest.TestCase):
+    def validate_commands(self, commands: object) -> list[str]:
+        validator = validate_plugins.Validator(Path("/repo"))
+        validator.validate_commands(
+            Path("/repo/example/plugin.toml"),
+            {
+                "service": [{"id": "service", "entry": "service.luau"}],
+                "command": commands,
+            },
+        )
+        return validator.errors
+
+    def test_accepts_complete_and_defaulted_commands(self) -> None:
+        self.assertEqual(
+            self.validate_commands(
+                [
+                    {"id": "cycle-output", "entry": "service", "event": "cycle-output"},
+                    {
+                        "id": "connect-slot",
+                        "entry": "service",
+                        "target": "all",
+                        "event": "connect",
+                        "payload": "{{slot}}",
+                        "description": "Connect a configured slot",
+                        "category": "audio",
+                    },
+                ]
+            ),
+            [],
+        )
+
+    def test_rejects_duplicate_unknown_and_unsafe_commands(self) -> None:
+        errors = self.validate_commands(
+            [
+                {"id": "cycle", "entry": "missing", "event": "cycle output"},
+                {"id": "cycle", "entry": "service", "event": "cycle", "extra": True},
+            ]
+        )
+        self.assertTrue(any("unknown plugin entry 'missing'" in error for error in errors))
+        self.assertTrue(any("event must match" in error for error in errors))
+        self.assertTrue(any("duplicate command id 'cycle'" in error for error in errors))
+        self.assertTrue(any("unknown field 'extra'" in error for error in errors))
+
+    def test_rejects_wrong_container_and_optional_types(self) -> None:
+        self.assertTrue(any("array of tables" in error for error in self.validate_commands({})))
+        errors = self.validate_commands(
+            [{"id": "cycle", "entry": "service", "event": "cycle", "payload": 7}]
+        )
+        self.assertTrue(any("payload must be a string" in error for error in errors))
+
+
 class PluginConfigAccessorTests(unittest.TestCase):
     def test_accepts_universal_accessor(self) -> None:
         self.assertEqual(
