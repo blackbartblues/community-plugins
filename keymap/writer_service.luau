@@ -11,6 +11,7 @@ local REFRESH_REQUEST_KEY = "keymap.refresh_request"
 local LAST_HANDLED_REQUEST_KEY = "keymap.last_handled_create_request"
 local LAST_HANDLED_UPDATE_KEY = "keymap.last_handled_update_request"
 local SNAPSHOT_KEY = "keymap.snapshot"
+local EXACT_SOURCE_FINGERPRINT = "exact-v1"
 
 local MAX_ROOT_BYTES = 2 * 1024 * 1024
 local MAX_MANAGED_BYTES = 1024 * 1024
@@ -800,15 +801,28 @@ processValidatedRequest = function(request)
 	verifyAndReload(request, transaction)
 end
 
-local function xorByte(left, right)
+local function xorNibbleSlow(left, right)
 	local result, place = 0, 1
-	for _ = 1, 8 do
+	for _ = 1, 4 do
 		if left % 2 ~= right % 2 then result = result + place end
 		left = math.floor(left / 2)
 		right = math.floor(right / 2)
 		place = place * 2
 	end
 	return result
+end
+
+local xorNibbles = {}
+for left = 0, 15 do
+	xorNibbles[left] = {}
+	for right = 0, 15 do
+		xorNibbles[left][right] = xorNibbleSlow(left, right)
+	end
+end
+
+local function xorByte(left, right)
+	return xorNibbles[left % 16][right % 16]
+		+ xorNibbles[math.floor(left / 16)][math.floor(right / 16)] * 16
 end
 
 local xorByteFast = type(bit32) == "table" and type(bit32.bxor) == "function" and bit32.bxor or xorByte
@@ -821,6 +835,10 @@ local function contentFingerprint(value)
 		hash = (hash * 403 + (hash % 256) * 16777216) % 4294967296
 	end
 	return string.format("%08x", hash)
+end
+
+local function sourceFingerprintMatches(value, expected)
+	return expected == EXACT_SOURCE_FINGERPRINT or contentFingerprint(value) == expected
 end
 
 local function splitLines(content)
@@ -841,7 +859,7 @@ local function replaceLineRange(content, firstLine, lastLine, expected, replacem
 	local lines, trailingNewline = splitLines(content)
 	if firstLine < 1 or lastLine < firstLine or lastLine > #lines then return nil, "target_range_invalid" end
 	local current = table.concat(lines, "\n", firstLine, lastLine)
-	if current ~= expected or contentFingerprint(current) ~= contentFingerprint(expected) then
+	if current ~= expected then
 		return nil, "target_changed"
 	end
 	local replacementLines = {}
@@ -875,11 +893,11 @@ local function reorderLineRanges(content, target, anchor, placement, replacement
 	local currentTarget = table.concat(lines, "\n", targetFirst, targetLast)
 	local currentAnchor = table.concat(lines, "\n", anchorFirst, anchorLast)
 	if currentTarget ~= targetRaw
-		or contentFingerprint(currentTarget) ~= tostring(target.fingerprint or "") then
+		or not sourceFingerprintMatches(currentTarget, tostring(target.fingerprint or "")) then
 		return nil, "target_changed"
 	end
 	if currentAnchor ~= anchorRaw
-		or contentFingerprint(currentAnchor) ~= tostring(anchor.fingerprint or "") then
+		or not sourceFingerprintMatches(currentAnchor, tostring(anchor.fingerprint or "")) then
 		return nil, "anchor_changed"
 	end
 
@@ -1143,7 +1161,9 @@ local function processValidatedUpdate(request, target, currentCategory)
 		busy = false
 		return
 	end
-	if contentFingerprint(tostring(target.raw_snippet or "")) ~= tostring(target.fingerprint or "") then
+	if not sourceFingerprintMatches(
+		tostring(target.raw_snippet or ""), tostring(target.fingerprint or "")
+	) then
 		publishUpdateResult(request.request_id, false, "target_changed", target.source)
 		busy = false
 		return
@@ -1231,7 +1251,7 @@ local function processValidatedMove(request, target, currentCategory)
 		return
 	end
 	local rawSnippet = tostring(target.raw_snippet or "")
-	if contentFingerprint(rawSnippet) ~= tostring(target.fingerprint or "") then
+	if not sourceFingerprintMatches(rawSnippet, tostring(target.fingerprint or "")) then
 		publishUpdateResult(request.request_id, false, "target_changed", target.source)
 		busy = false
 		return
@@ -1304,12 +1324,16 @@ local function processValidatedReorder(request, target, anchor)
 		busy = false
 		return
 	end
-	if contentFingerprint(tostring(target.raw_snippet or "")) ~= tostring(target.fingerprint or "") then
+	if not sourceFingerprintMatches(
+		tostring(target.raw_snippet or ""), tostring(target.fingerprint or "")
+	) then
 		publishUpdateResult(request.request_id, false, "target_changed", target.source)
 		busy = false
 		return
 	end
-	if contentFingerprint(tostring(anchor.raw_snippet or "")) ~= tostring(anchor.fingerprint or "") then
+	if not sourceFingerprintMatches(
+		tostring(anchor.raw_snippet or ""), tostring(anchor.fingerprint or "")
+	) then
 		publishUpdateResult(request.request_id, false, "anchor_changed", anchor.source)
 		busy = false
 		return
@@ -1487,9 +1511,9 @@ local function processValidatedCategoryRename(request, category)
 				return
 			end
 			local current = table.concat(lines, "\n", bind.start_line, bind.end_line)
-			if contentFingerprint(rawSnippet) ~= tostring(bind.fingerprint or "")
+			if not sourceFingerprintMatches(rawSnippet, tostring(bind.fingerprint or ""))
 				or current ~= rawSnippet
-				or contentFingerprint(current) ~= tostring(bind.fingerprint or "") then
+				or not sourceFingerprintMatches(current, tostring(bind.fingerprint or "")) then
 				publishUpdateResult(request.request_id, false, "target_changed", path)
 				busy = false
 				return
@@ -1573,7 +1597,7 @@ local function processValidatedMutation(request, target)
 		return
 	end
 	local rawSnippet = tostring(target.raw_snippet or "")
-	if contentFingerprint(rawSnippet) ~= tostring(target.fingerprint or "") then
+	if not sourceFingerprintMatches(rawSnippet, tostring(target.fingerprint or "")) then
 		publishUpdateResult(request.request_id, false, "target_changed", target.source)
 		busy = false
 		return
